@@ -1,0 +1,11 @@
+pub mod check_code_handler;
+pub mod forgot_password_handler;
+pub mod generate_magiclink_handler;
+pub mod get_me_handler;
+pub mod login_user_handler;
+pub mod logout_handler;
+pub mod refresh_access_token_handler;
+pub mod register_user_handler;
+pub mod reset_password_handler;
+pub mod verify_code_handler;
+pub mod verify_magiclink_code_handler;
