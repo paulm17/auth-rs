@@ -54,6 +54,7 @@ A comprehensive authentication system built with Rust and modern web technologie
   - [ ] WhatsApp Integration
 - [x] System Tracing
 - [ ] Comprehensive Testing Suite
+- [x] Generate access and refresh tokens on startup
 
 ## Dependencies
 

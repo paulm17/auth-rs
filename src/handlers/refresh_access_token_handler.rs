@@ -30,7 +30,7 @@ pub async fn refresh_access_token_handler(
     })?;
 
   let refresh_token_details =
-    match token::verify_jwt_token(data.env.refresh_token_public_key.to_owned(), &refresh_token)
+    match token::verify_jwt_token(data.rsa.refresh_tokens.public_key.to_owned(), &refresh_token)
     {
       Ok(token_details) => token_details,
       Err(e) => {
@@ -68,7 +68,7 @@ pub async fn refresh_access_token_handler(
   let access_token_details = generate_token(
     user_id.into(),
     data.env.access_token_max_age,
-    data.env.access_token_private_key.to_owned(),
+    data.rsa.access_tokens.private_key.to_owned(),
   )?;
 
   let access_token_timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
@@ -146,7 +146,7 @@ pub async fn refresh_access_token_handler(
     let refresh_token_details = generate_token(
       user_id.into(),
       data.env.refresh_token_max_age,
-      data.env.refresh_token_private_key.to_owned(),
+      data.rsa.refresh_tokens.private_key.to_owned(),
     )?;
 
     let refresh_token_timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;

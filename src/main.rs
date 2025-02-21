@@ -6,12 +6,14 @@ mod model;
 mod response;
 mod route;
 mod token;
+mod rsa;
 mod smtp;
 mod template;
 mod utils;
 
 use convex::ConvexClient;
 use config::Config;
+use rsa::RsaConfig;
 use std::sync::Arc;
 use axum::http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE}, HeaderValue, Method
@@ -27,6 +29,7 @@ use tracing_subscriber::FmtSubscriber;
 pub struct AppState {
   convex: ConvexClient,
   env: Config,
+  rsa: RsaConfig
 }
 
 #[tokio::main]
@@ -51,14 +54,17 @@ async fn main() {
     .allow_origin(config.clone().client_origin.parse::<HeaderValue>().unwrap())
     .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
     .allow_credentials(true)
-    .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE]);
+    .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE]);  
+
+  let rsa_tokens = rsa::init(client.clone()).await;
 
   let app = create_router(Arc::new(AppState {
     convex: client.clone(),
     env: config.clone(),
+    rsa: rsa_tokens.unwrap()
   }))
   .layer(cors);
-  
+
   // Create the app router for HTTPS
   let https_app = app.clone();
 
@@ -88,5 +94,5 @@ async fn main() {
       let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
       axum::serve(listener, app).await.unwrap();
     }
-);
+  );
 }

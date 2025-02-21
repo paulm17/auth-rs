@@ -58,7 +58,7 @@ pub async fn auth(
   })?;
 
   let access_token_details =
-    match token::verify_jwt_token(data.env.access_token_public_key.to_owned(), &access_token) {
+    match token::verify_jwt_token(data.rsa.access_tokens.public_key.to_owned(), &access_token) {
       Ok(token_details) => token_details,
       Err(e) => {
         let error_response = ErrorResponse {

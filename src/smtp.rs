@@ -1,8 +1,7 @@
 use axum::extract::State;
 use mail_send::{mail_builder::MessageBuilder, SmtpClientBuilder};
 use std::{path::PathBuf, sync::Arc};
-use rand::Rng;
-use rand::distr::Alphanumeric;
+use rand::{distributions::Alphanumeric, Rng};
 use serde_json::Value;
 
 use crate::{template::TemplateEngine, AppState};
@@ -108,10 +107,10 @@ fn generate_email(options: GenerateOptions)
 }
 
 pub fn generate_random_string() -> String {
-  let mut rng = rand::rng();
+  let mut rng = rand::thread_rng();
   let random_string: String = (0..32)
-    .map(|_| rng.sample(Alphanumeric) as char)
-    .collect();
+      .map(|_| rng.sample(Alphanumeric) as char)
+      .collect();
 
-  return random_string;
+  random_string
 }

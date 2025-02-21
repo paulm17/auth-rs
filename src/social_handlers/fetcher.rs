@@ -23,8 +23,8 @@ pub trait OAuthProfileProvider {
     &self, 
     _client: &reqwest::Client, 
     _access_token: &str
-  ) -> Result<serde_json::Value, (StatusCode, Json<serde_json::Value>)> {
-    Ok(serde_json::Value::Null) // Default implementation returns null
+  ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    Ok("".into()) // Default implementation returns null
   }
   
   // Provider-specific parsing
@@ -64,11 +64,11 @@ pub async fn handle_oauth_provider<P: OAuthProfileProvider>(
   })?;  
 
   // Extract user info using provider-specific implementation
-  let (email, name, obj) = provider.extract_user_info(response_json, &bytes)?;
+  let (mut email, name, obj) = provider.extract_user_info(response_json, &bytes)?;
 
   // Fetch additional data if needed
   if provider.provider() == &OAuthProvider::Github {
-    provider.fetch_additional_data(&reqwest::Client::new(), access_token).await?;
+    email = provider.fetch_additional_data(&reqwest::Client::new(), access_token).await.unwrap();
   }
   
   Ok((email, name, obj))

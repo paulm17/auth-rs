@@ -47,12 +47,9 @@ pub struct Config {
   pub twitter_client_secret: String,
   pub twitter_redirect_url: String,
 
-  pub access_token_private_key: String,
-  pub access_token_public_key: String,
+  pub auth_token: String,
   pub access_token_expires_in: String,
   pub access_token_max_age: i64,
-  pub refresh_token_private_key: String,
-  pub refresh_token_public_key: String,
   pub refresh_token_expires_in: String,
   pub refresh_token_max_age: i64,
 }
@@ -63,13 +60,9 @@ impl Config {
     let client_origin = get_env_var("AUTH_CLIENT_ORIGIN");        
     let server_url = get_env_var("AUTH_SERVER_URL");
 
-    let access_token_private_key = get_env_var("AUTH_ACCESS_TOKEN_PRIVATE_KEY");
-    let access_token_public_key = get_env_var("AUTH_ACCESS_TOKEN_PUBLIC_KEY");
+    let auth_token = get_env_var("AUTH_TOKEN");
     let access_token_expires_in = get_env_var("AUTH_ACCESS_TOKEN_EXPIRED_IN");
     let access_token_max_age = get_env_var("AUTH_ACCESS_TOKEN_MAXAGE");
-
-    let refresh_token_private_key = get_env_var("AUTH_REFRESH_TOKEN_PRIVATE_KEY");
-    let refresh_token_public_key = get_env_var("AUTH_REFRESH_TOKEN_PUBLIC_KEY");
     let refresh_token_expires_in = get_env_var("AUTH_REFRESH_TOKEN_EXPIRED_IN");
     let refresh_token_max_age = get_env_var("AUTH_REFRESH_TOKEN_MAXAGE");
 
@@ -153,12 +146,9 @@ impl Config {
       twitter_client_id,
       twitter_client_secret,
       twitter_redirect_url,
-      access_token_private_key,
-      access_token_public_key,
+      auth_token,
       access_token_expires_in,
       access_token_max_age: access_token_max_age.parse::<i64>().unwrap(),
-      refresh_token_private_key,
-      refresh_token_public_key,
       refresh_token_expires_in,
       refresh_token_max_age: refresh_token_max_age.parse::<i64>().unwrap(),
     }

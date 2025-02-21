@@ -25,60 +25,58 @@ pub struct TokenClaims {
 }
 
 pub fn generate_jwt_token(
-    user_id: String,
-    ttl: i64,
-    private_key: String,
+  user_id: String,
+  ttl: i64,
+  private_key: String,
 ) -> Result<TokenDetails, jsonwebtoken::errors::Error> {
-    let bytes_private_key = general_purpose::STANDARD.decode(private_key).unwrap();
-    let decoded_private_key = String::from_utf8(bytes_private_key).unwrap();
+  let bytes_private_key = general_purpose::STANDARD.decode(private_key).unwrap();
+  let decoded_private_key = String::from_utf8(bytes_private_key).unwrap();
 
-    let now = chrono::Utc::now();
-    let mut token_details = TokenDetails {
-        user_id,
-        token_uuid: Uuid::new_v4(),
-        expires_in: Some((now + chrono::Duration::minutes(ttl)).timestamp()),
-        token: None,
-    };
+  let now = chrono::Utc::now();
+  let mut token_details = TokenDetails {
+      user_id,
+      token_uuid: Uuid::new_v4(),
+      expires_in: Some((now + chrono::Duration::minutes(ttl)).timestamp()),
+      token: None,
+  };
 
-    let claims = TokenClaims {
-        sub: token_details.user_id.to_string(),
-        token_uuid: token_details.token_uuid.to_string(),
-        exp: token_details.expires_in.unwrap(),
-        iat: now.timestamp(),
-        nbf: now.timestamp(),
-    };
+  let claims = TokenClaims {
+      sub: token_details.user_id.to_string(),
+      token_uuid: token_details.token_uuid.to_string(),
+      exp: token_details.expires_in.unwrap(),
+      iat: now.timestamp(),
+      nbf: now.timestamp(),
+  };
 
-    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-    let token = jsonwebtoken::encode(
-        &header,
-        &claims,
-        &jsonwebtoken::EncodingKey::from_rsa_pem(decoded_private_key.as_bytes())?,
-    )?;
-    token_details.token = Some(token);
-    Ok(token_details)
+  let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+  let token = jsonwebtoken::encode(
+      &header,
+      &claims,
+      &jsonwebtoken::EncodingKey::from_rsa_pem(decoded_private_key.as_bytes())?,
+  )?;
+  token_details.token = Some(token);
+  Ok(token_details)
 }
 
 pub fn verify_jwt_token(
-    public_key: String,
-    token: &str,
+  public_key: String,
+  token: &str,
 ) -> Result<TokenDetails, jsonwebtoken::errors::Error> {
-    let bytes_public_key = general_purpose::STANDARD.decode(public_key).unwrap();
-    let decoded_public_key = String::from_utf8(bytes_public_key).unwrap();
+  let bytes_public_key = general_purpose::STANDARD.decode(public_key).unwrap();
+  // let decoded_public_key = String::from_utf8(bytes_public_key).unwrap();
+  let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+  let decoded = jsonwebtoken::decode::<TokenClaims>(
+    token,
+    &jsonwebtoken::DecodingKey::from_rsa_pem(&bytes_public_key)?,
+    &validation,
+  )?;
 
-    let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-
-    let decoded = jsonwebtoken::decode::<TokenClaims>(
-        token,
-        &jsonwebtoken::DecodingKey::from_rsa_pem(decoded_public_key.as_bytes())?,
-        &validation,
-    )?;
-
-    Ok(TokenDetails {
-        token: None,
-        token_uuid: Uuid::parse_str(decoded.claims.token_uuid.as_str()).unwrap(),
-        user_id: decoded.claims.sub,
-        expires_in: None,
-    })
+  Ok(TokenDetails {
+    token: None,
+    token_uuid: Uuid::parse_str(decoded.claims.token_uuid.as_str()).unwrap(),
+    user_id: decoded.claims.sub,
+    expires_in: None,
+  })
 }
 
 pub async fn blacklist_token(
@@ -88,7 +86,7 @@ pub async fn blacklist_token(
   let mut client = data.convex.clone();
 
   let token_details =
-    match token::verify_jwt_token(data.env.access_token_public_key.to_owned(), &_token)
+    match token::verify_jwt_token(data.env.auth_token.to_owned(), &_token)
     {
       Ok(token_details) => token_details,
       Err(e) => {

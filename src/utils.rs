@@ -19,9 +19,9 @@ pub fn parse_duration(duration_str: &str) -> Result<i64, Box<dyn std::error::Err
 pub fn generate_token(
     user_id: String,
     max_age: i64,
-    private_key: String,
+    auth_token: String,
 ) -> Result<TokenDetails, (StatusCode, Json<serde_json::Value>)> {
-  generate_jwt_token(user_id, max_age, private_key).map_err(|e| {
+  generate_jwt_token(user_id, max_age, auth_token).map_err(|e| {
     let error_response = serde_json::json!({
         "status": "error",
         "message": format!("error generating token: {}", e),

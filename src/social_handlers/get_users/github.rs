@@ -75,7 +75,7 @@ impl OAuthProfileProvider for GithubProvider {
     &self,
     client: &reqwest::Client,
     access_token: &str
-) -> Result<serde_json::Value, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     let github_emails = client
       .get("https://api.github.com/user/emails")
       .header(header::AUTHORIZATION, format!("Bearer {}", access_token))
@@ -99,7 +99,14 @@ impl OAuthProfileProvider for GithubProvider {
           }))
       ))?;
 
-    Ok(serde_json::to_value(github_emails).unwrap())
+    let email = github_emails
+      .iter()
+      .find(|e| e.primary && e.verified)
+      .ok_or_else(|| missing_field_error("Email"))?
+      .email
+      .clone();
+
+    Ok(email)
   }
 
   fn extract_user_info(&self, response_json: serde_json::Value, bytes: &[u8]) 
@@ -112,25 +119,9 @@ impl OAuthProfileProvider for GithubProvider {
       }))
     ))?;      
     
-    let emails: Vec<GitHubEmail> = serde_json::from_value(response_json.clone())
-      .map_err(|_| (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({
-          "status": "error",
-          "message": "Failed to parse emails"
-        }))
-      ))?;
-
-    let email = emails
-      .iter()
-      .find(|e| e.primary && e.verified)
-      .ok_or_else(|| missing_field_error("Email"))?
-      .email
-      .clone();
-
     let name = user.name
       .ok_or_else(|| missing_field_error("Name"))?;
     
-    Ok((email, name, response_json))
+    Ok(("".into(), name, response_json))
   }
 }

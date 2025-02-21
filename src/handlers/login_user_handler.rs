@@ -63,13 +63,13 @@ pub async fn login_user_handler(
   let access_token_details = generate_token(
     user_id.to_string(),
     data.env.access_token_max_age,
-    data.env.access_token_private_key.to_owned(),
+    data.rsa.access_tokens.private_key.to_owned()
   )?;
 
   let refresh_token_details = generate_token(
     user_id.to_string(),
     data.env.refresh_token_max_age,
-    data.env.refresh_token_private_key.to_owned(),
+    data.rsa.refresh_tokens.private_key.to_owned(),
   )?;
 
   let access_cookie = Cookie::build(
