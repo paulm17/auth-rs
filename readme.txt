@@ -58,7 +58,7 @@ A comprehensive authentication system built with Rust and modern web technologie
 
 ## Dependencies
 
-- Rust/Actix-Web (Backend)
+- Rust/Axum (Backend)
 - OAuth2-rs for social authentication
 - Frontend framework (Specify your choice)
 
