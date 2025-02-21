@@ -36,7 +36,7 @@ A comprehensive authentication system built with Rust and modern web technologie
 - [x] Google
 - [x] LinkedIn
 - [x] Reddit
-- [x] GitHub (In Progress)
+- [x] GitHub
 - [ ] TikTok (Requires Domain)
 - [x] Twitch (Rust Implementation Issue)
 - [ ] Microsoft Azure (Requires Azure account)
