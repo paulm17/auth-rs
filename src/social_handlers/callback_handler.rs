@@ -7,15 +7,15 @@ use axum::{
 };
 use anyhow::Result;
 use axum_extra::extract::cookie::{Cookie, SameSite};
+use diesel::{query_dsl::methods::FilterDsl, ExpressionMethods, OptionalExtension, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use oauth2::{
   basic::BasicClient, AuthType, AuthUrl, AuthorizationCode, ClientId, ClientSecret, PkceCodeVerifier, RedirectUrl, TokenResponse, TokenUrl
 };
-use convex::FunctionResult::Value;
 use crate::{
-  utils::{generate_token, parse_duration}, AppState
+  schema::{identities, social_auth, social_provider, tokens, user, Identity, SocialAuth, SocialProvider, Token, User}, token::generate_paseto_token, utils::parse_duration, AppState
 };
 
 use super::{fetcher::handle_oauth_provider, get_users::{amazon::AmazonProvider, facebook::FacebookProvider, github::GithubProvider, google::GoogleProvider, instagram::InstagramProvider, linkedin::LinkedInProvider, microsoft::MicrosoftProvider, reddit::RedditProvider, tiktok::TiktokProvider, twitch::TwitchProvider, twitter::TwitterProvider}, model::OAuthProvider};
@@ -31,74 +31,40 @@ pub async fn callback_handler(
   State(data): State<Arc<AppState>>,
   Query(params): Query<OAuthCallbackParams>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    // Verify CSRF token
-  let mut client = data.convex.clone();
-  let result = client
-    .query(
-      "socialOauth:getCSRF",
-      maplit::btreemap! {
-          "csrf".into() => params.state.clone().into(),
-      },
-    )
-    .await;
+  let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
+  
+  // Verify CSRF token
+  let social_oauth_exists = social_auth::table
+    .filter(social_auth::csrf.eq(params.state.clone()))
+    .first::<SocialAuth>(&mut conn)
+    .optional();
 
-  let (csrf, provider_id, redirect_to, pkce_verifier) = match &result {
-    Ok(Value(convex::Value::Object(obj))) => {
-      let csrf = obj.get("csrf")
-        .and_then(|v: &convex::Value| match v {
-          convex::Value::String(s) => Some(s.as_str()),
-          _ => None
-        })
-        .unwrap_or("");
-
-      let provider_id = obj.get("providerId")
-        .and_then(|v: &convex::Value| match v {
-          convex::Value::String(s) => Some(s.as_str()),
-          _ => None
-        })
-        .unwrap_or("");
-
-      let redirect_to = obj.get("redirectTo")
-        .and_then(|v: &convex::Value| match v {
-          convex::Value::String(s) => Some(s.as_str()),
-          _ => None
-        })
-        .unwrap_or("");
-
-      let pkce_verifier = obj.get("pkceVerifier")
-        .and_then(|v: &convex::Value| match v {
-          convex::Value::String(s) => Some(s.as_str()),
-          _ => None
-        })
-        .unwrap_or("");
-
-      (csrf, provider_id, redirect_to, pkce_verifier)
-    }
-    _ => ("", "", "", ""),
+  let social_oauth = if let Ok(Some(social_oauth)) = social_oauth_exists {
+    social_oauth
+  } else {
+    let error_response = serde_json::json!({
+      "status": "fail",
+      "message": "CSRF token not found"
+    });
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   };
 
-  let provider_exists = client.query("socialProviders:getProviderById", maplit::btreemap!{
-    "id".into() => provider_id.into(),
-  }).await;
+  let provider_exists = social_provider::table
+    .filter(social_provider::id.eq(social_oauth.provider_id.clone()))
+    .first::<SocialProvider>(&mut conn)
+    .optional();
 
-  let provider_name = match &provider_exists {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("name")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::String(s) => Some(s.as_str()),
-        _ => None
-      })
-      .unwrap_or(""),
-    Err(e) => {
-      let error_response = serde_json::json!({
-        "status": "fail",
-        "message": format_args!("Provider not found {:?}", e)
-      });
-      return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
-    }
-    _ => "",
+  let provider_name = if let Ok(Some(provider)) = provider_exists {
+    provider.name
+  } else {
+    let error_response = serde_json::json!({
+      "status": "fail",
+      "message": "Provider not found"
+    });
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   };
 
-  if csrf != params.state {
+  if social_oauth.csrf != params.state {
     let error_response = serde_json::json!({
       "status": "fail",
       "message": "Invalid state parameter",
@@ -107,7 +73,7 @@ pub async fn callback_handler(
   }
 
   // Get provider-specific client and fetch user info
-  let provider = OAuthProvider::from_str(provider_name).ok_or_else(|| {
+  let provider = OAuthProvider::from_str(&provider_name).ok_or_else(|| {
     let error_response = serde_json::json!({
       "status": "fail",
       "message": "Provider not found",
@@ -137,7 +103,7 @@ pub async fn callback_handler(
   let token_response = if provider == OAuthProvider::Twitter {    
     client
       .exchange_code(AuthorizationCode::new(params.code))
-      .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier.to_string()))
+      .set_pkce_verifier(PkceCodeVerifier::new(social_oauth.pkce_verifier.to_string()))
     } else {
       client.exchange_code(AuthorizationCode::new(params.code))
     };
@@ -190,111 +156,153 @@ pub async fn callback_handler(
     OAuthProvider::Tiktok => handle_oauth_provider(&TiktokProvider, access_token).await?,
     OAuthProvider::Twitch => handle_oauth_provider(&TwitchProvider, access_token).await?,
     OAuthProvider::Twitter => handle_oauth_provider(&TwitterProvider, access_token).await?,
-};
-
-  // Check if user exists
-  let mut client = data.convex.clone();
-  let user_exists = client
-    .query(
-      "users:getUserbyEmail",
-      maplit::btreemap! {
-        "email".into() => email.clone().into(),
-      },
-    )
-    .await;
-
-  let mut user_id = match &user_exists {
-    Ok(Value(convex::Value::Object(obj))) => obj
-      .get("id")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::String(s) => Some(s.to_string()),
-        _ => None,
-      })
-      .unwrap_or_else(String::new),
-    _ => String::new(),
   };
+
+  let user_exists = user::table
+    .filter(user::email.eq(email.clone()))
+    .first::<User>(&mut conn)
+    .optional();
+
+    let user_id = if let Ok(Some(user)) = user_exists {
+      user.id
+    } else {
+      let error_response = serde_json::json!({
+          "status": "fail",
+          "message": "Invalid email or password"
+      });
+      return Err((StatusCode::BAD_REQUEST, Json(error_response)));
+    };
 
   if user_id.is_empty() {
     // Create new user
-    let timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-    user_id = Ulid::new().to_string();
-    let result = client
-      .mutation(
-      "users:insertUserbyEmail",
-      maplit::btreemap! {
-        "id".into() => user_id.clone().into(),
-        "name".into() => name.into(),
-        "email".into() => email.into(),
-        "verified".into() => true.into(),
-        "role".into() => "user".into(),
-        "createdAt".into() => timestamp_float.into(),
-        },
-      )
-      .await;
+    let timestamp = Utc::now().naive_utc();
+    let statement = diesel::insert_into(user::table)
+      .values(&User {
+          id: user_id.clone(),
+          name: name.into(),
+          email: email.into(),
+          password: None,
+          verified: false,
+          created_at: timestamp,
+          updated_at: None,
+          deleted_at: None
+      })
+      .get_result::<User>(&mut conn);
 
-    if format!("{:?}", result).contains("Server Error") {
+    if let Err(e) = statement {
       let error_response = serde_json::json!({
         "status": "fail",
-        "message": "New user could not be saved to database",
+        "message": format!("New user could not be saved to database: {}", e),
       });
+      
       return Err((StatusCode::BAD_REQUEST, Json(error_response)));
     }
   }
 
   // Insert identity    
-  let last_signin_at_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-  let timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-  let result = client.mutation("identities:insertIdentity", maplit::btreemap!{
-    "id".into() => Ulid::new().to_string().into(),
-    "userId".into() => user_id.clone().into(),
-    "providerId".into() => provider_id.into(),
-    "identityData".into() => obj.to_string().into(),
-    "lastSignInAt".into() => last_signin_at_float.into(),
-    "createdAt".into() => timestamp_float.into(),
-  }).await;
+  let timestamp = Utc::now().naive_utc();
+  let last_signin_at = Utc::now().naive_utc();
+  let statement = diesel::insert_into(identities::table)
+    .values(&Identity {
+      id: Ulid::new().to_string().into(),
+      user_id: user_id.clone().into(),
+      provider_id: social_oauth.provider_id.into(),
+      identity_data: obj.into(),
+      last_signin_at: last_signin_at.into(),
+      created_at: timestamp,
+      updated_at: None,
+      deleted_at: None
+    })
+    .execute(&mut conn);
 
-  if format!("{:?}", result).contains("Server Error") {
-    println!("{:?}", result);
-
-    let error_message = "new identity could not saved to database";
+  if let Err(e) = statement {
     let error_response = serde_json::json!({
       "status": "fail",
-      "message": error_message
+      "message": format!("New identity could not be saved to database: {}", e),
     });
+    
     return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   }
 
   // Generate tokens
-  let access_token_details = generate_token(
+  let access_token_details = generate_paseto_token(
     user_id.clone(),
     data.env.access_token_max_age,
-    data.rsa.access_tokens.private_key.to_owned(),
-  )?;
+    &data.paseto.access_key,
+  ).unwrap();
 
-  let refresh_token_details = generate_token(
+  let refresh_token_details = generate_paseto_token(
     user_id.clone(),
     data.env.refresh_token_max_age,
-    data.rsa.refresh_tokens.private_key.to_owned(),
-  )?;
+    &data.paseto.refresh_key,
+  ).unwrap();
 
   // Save tokens
-  let access_token_timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-  let _ = client.mutation("tokens:insertToken", maplit::btreemap!{
-    "id".into() => access_token_details.token_uuid.to_string().into(),
-    "userId".into() => user_id.clone().into(),
-    "token".into() => access_token_details.token.clone().unwrap().into(),
-    "expires".into() => (access_token_details.expires_in.clone().unwrap() as f64).into(),
-    "createdAt".into() => access_token_timestamp_float.into(),
-  }).await;
+  // Access token
+  let expires = DateTime::<Utc>::from_timestamp(access_token_details.expires_in.unwrap(), 0)
+    .map(|dt| dt.naive_utc())
+    .unwrap_or_else(|| {
+      // Handle invalid timestamps
+      DateTime::<Utc>::from_timestamp(0, 0)
+        .unwrap()
+        .naive_utc()
+    });
+  let timestamp = Utc::now().naive_utc();
+  let statement = diesel::insert_into(tokens::table)
+    .values(&Token {
+      id: Ulid::new().to_string(),
+      user_id: user_id.clone().into(),
+      expires,
+      blacklisted: false,
+      token: access_token_details.token.clone().unwrap(),
+      token_uuid: access_token_details.token_uuid.to_string(),
+      created_at: timestamp,
+      updated_at: None,
+      deleted_at: None
+    })
+    .execute(&mut conn);
+  
+  if let Err(e) = statement {
+    let error_message = format!("Failed to save access token: validation error\nDetails: {:?}", e);
+    let error_response = serde_json::json!({
+        "status": "fail",
+        "message": error_message
+    });
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
+  }
 
-  let refresh_token_timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-  let _ = client.mutation("tokens:insertToken", maplit::btreemap!{
-    "id".into() => refresh_token_details.token_uuid.to_string().into(),
-    "userId".into() => user_id.clone().into(),
-    "token".into() => refresh_token_details.token.clone().unwrap().into(),
-    "expires".into() => (refresh_token_details.expires_in.clone().unwrap() as f64).into(),
-    "createdAt".into() => refresh_token_timestamp_float.into(),
-  }).await;
+  // Refresh Token
+  let expires = DateTime::<Utc>::from_timestamp(access_token_details.expires_in.unwrap(), 0)
+    .map(|dt| dt.naive_utc())
+    .unwrap_or_else(|| {
+      // Handle invalid timestamps
+      DateTime::<Utc>::from_timestamp(0, 0)
+        .unwrap()
+        .naive_utc()
+    });
+  let timestamp = Utc::now().naive_utc();
+  let statement = diesel::insert_into(tokens::table)
+    .values(&Token {
+      id: Ulid::new().to_string(),
+      user_id: user_id.into(),
+      expires,
+      blacklisted: false,
+      token: refresh_token_details.token.clone().unwrap(),
+      token_uuid: refresh_token_details.token_uuid.to_string(),
+      created_at: timestamp,
+      updated_at: None,
+      deleted_at: None
+    })
+    .execute(&mut conn);
+  
+  if let Err(e) = statement {
+    let error_message = format!("Failed to save refresh token: validation error\nDetails: {:?}", e);
+    let error_response = serde_json::json!({
+        "status": "fail",
+        "message": error_message
+    });
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
+  }
 
   // Set cookies
   let access_cookie = Cookie::build(
@@ -313,7 +321,7 @@ pub async fn callback_handler(
     .same_site(SameSite::None)
     .http_only(true);
 
-  let redirect = Redirect::temporary(&redirect_to);
+  let redirect = Redirect::temporary(&social_oauth.redirect_to);
   let mut response = redirect.into_response();
 
   response.headers_mut().append(

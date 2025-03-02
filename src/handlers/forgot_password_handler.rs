@@ -3,68 +3,60 @@ use axum::{
   extract::State, http::{header, HeaderMap, Response, StatusCode}, response::IntoResponse, Json
 };
 use anyhow::Result;
+use diesel::{query_dsl::methods::FilterDsl, ExpressionMethods, OptionalExtension, RunQueryDsl};
 use serde_json::json;
-use convex::FunctionResult::Value;
 use ulid::Ulid;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use crate::{
-  model::ForgotPasswordSchema, smtp::{self, generate_random_string, EmailBaseParams, EmailParams}, AppState
+  model::ForgotPasswordSchema, schema::{email_confirmation, user, EmailConfirmation, User}, smtp::{self, generate_random_string, EmailBaseParams, EmailParams}, AppState
 };
 
 pub async fn forgot_password_handler(
     State(data): State<Arc<AppState>>,
     Json(body): Json<ForgotPasswordSchema>,
   ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
     let email = body.email.to_owned();
     let redirect_to = body.redirect_to.to_owned();
   
     // check whether user email exists
-    let mut client = data.convex.clone();
-    let user_exists = client.query("users:getUserbyEmail", maplit::btreemap!{
-      "email".into() => email.clone().into(),
-    }).await;
-  
-    let user_id = match &user_exists {
-      Ok(Value(convex::Value::Object(obj))) => obj.get("id")
-        .and_then(|v: &convex::Value| match v {
-          convex::Value::String(s) => Some(s.as_str()),
-          _ => None
-        })
-        .unwrap_or(""),
-      _ => "",
+    let user_exists = user::table
+    .filter(user::email.eq(email.clone()))
+    .first::<User>(&mut conn)
+    .optional();
+
+    let user_id = if let Ok(Some(user)) = user_exists {
+      user.id
+    } else {
+      let error_response = serde_json::json!({
+          "status": "fail",
+          "message": "User email does not exist"
+      });
+      return Err((StatusCode::BAD_REQUEST, Json(error_response)));
     };
   
-    if user_id == "" {
-      let error_response = serde_json::json!({
-          "status": "fail",
-          "message": "User email does not exist",
-      });
-      return Err((StatusCode::CONFLICT, Json(error_response)));
-    }
-  
-    // insert into database
+    // insert into database        
     let code = generate_random_string();
-    let expires: DateTime<Utc> = Utc::now() + Duration::days(10);
-    let expires_timestamp = expires.timestamp() as f64 * 1000.0;
-    let timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
+    let expires = (Utc::now() + Duration::days(10)).naive_utc();
+    let timestamp = Utc::now().naive_utc();
+    let statement = diesel::insert_into(email_confirmation::table)
+      .values(&EmailConfirmation {
+        id: Ulid::new().to_string(),
+        user_id: user_id.into(),
+        code: code.clone().into(),
+        redirect_to: redirect_to.into(),
+        expires,
+        flow: "created".into(),
+        created_at: timestamp,
+        updated_at: None,
+        deleted_at: None
+      })
+      .execute(&mut conn);
     
-    let result = client.mutation("emailConfirmation:insertCode", maplit::btreemap!{
-      "id".into() => Ulid::new().to_string().into(),
-      "userId".into() => user_id.into(),
-      "code".into() => code.clone().into(),    
-      "redirectTo".into() => redirect_to.into(),
-      "expires".into() => expires_timestamp.into(),
-      "flow".into() => "created".into(),
-      "createdAt".into() => timestamp_float.into(),
-    }).await;
-  
-    if format!("{:?}", result).contains("Server Error") {
-      println!("{:?}", result);
-  
-      let error_message = "forgot password code not saved to database";
+    if let Err(e) = statement {
       let error_response = serde_json::json!({
           "status": "fail",
-          "message": error_message
+          "message": format!("forgot password code not saved to database: validation error\nDetails: {:?}", e)
       });
       return Err((StatusCode::BAD_REQUEST, Json(error_response)));
     }

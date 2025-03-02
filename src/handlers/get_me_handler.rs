@@ -17,11 +17,11 @@ pub async fn get_me_handler(
         id: user.id.to_string(),
         email: user.email.to_owned(),
         name: user.name.to_owned(),
-        photo: user.photo.to_owned(),
-        role: user.role.to_owned(),
         verified: user.verified,
-        createdAt: user.created_at.unwrap(),
-        updatedAt: user.updated_at.unwrap(),
+        role: "".into(),
+        photo: "".into(),
+        createdAt: user.created_at,
+        updatedAt: user.updated_at,
       }
     });
   

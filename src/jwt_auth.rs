@@ -9,11 +9,10 @@ use axum::{
 };
 
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use convex::FunctionResult::Value;
+use diesel::{query_dsl::methods::FilterDsl, ExpressionMethods, OptionalExtension, RunQueryDsl};
+use serde::Serialize;
 
-use crate::{model::User, token, AppState};
+use crate::{schema::{user, User}, token, AppState};
 
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -21,9 +20,10 @@ pub struct ErrorResponse {
   pub message: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Clone)]
 pub struct JWTAuthMiddleware {
   pub user: User,
+  #[allow(dead_code)]
   pub access_token_uuid: uuid::Uuid,
 }
 
@@ -55,10 +55,10 @@ pub async fn auth(
       message: "You are not logged in, please provide token".to_string(),
     };
     (StatusCode::UNAUTHORIZED, Json(error_response))
-  })?;
+  })?;  
 
   let access_token_details =
-    match token::verify_jwt_token(data.rsa.access_tokens.public_key.to_owned(), &access_token) {
+    match token::verify_paseto_token(&data.paseto.access_key, &access_token) {
       Ok(token_details) => token_details,
       Err(e) => {
         let error_response = ErrorResponse {
@@ -80,130 +80,28 @@ pub async fn auth(
 
   let user_id = access_token_details.user_id.to_string();
 
-  let mut client = data.convex.clone();
-  let user_result = client.query("users:getUserbyId", maplit::btreemap!{
-    "id".into() => user_id.to_string().into()
-  }).await;
+  let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
+  
+  let user_result = user::table
+    .filter(user::id.eq(user_id.to_string()))
+    .first::<User>(&mut conn)
+    .optional();
 
-  let user = match &user_result {
-    Ok(Value(convex::Value::Object(obj))) => {
-      User {
-        id: obj.get("id")
-          .and_then(|v: &convex::Value| match v {
-            convex::Value::String(s) => Some(s.into()),
-            _ => None
-          })
-          .ok_or_else(|| {
-            let error_response = ErrorResponse {
-              status: "fail",
-              message: "Invalid user id".to_string(),
-            };
-            (StatusCode::BAD_REQUEST, Json(error_response))
-          })?,
-        email: obj.get("email")
-          .and_then(|v: &convex::Value| match v {
-            convex::Value::String(s) => Some(s.into()),
-            _ => None
-          })
-          .ok_or_else(|| {
-            let error_response = ErrorResponse {
-              status: "fail",
-              message: "Invalid user email".to_string(),
-            };
-            (StatusCode::BAD_REQUEST, Json(error_response))
-          })?,
-        name: obj.get("name")
-          .and_then(|v: &convex::Value| match v {
-            convex::Value::String(s) => Some(s.into()),
-            _ => None
-          })
-          .ok_or_else(|| {
-            let error_response = ErrorResponse {
-              status: "fail",
-              message: "Invalid user name".to_string(),
-            };
-            (StatusCode::BAD_REQUEST, Json(error_response))
-          })?,
-        role: obj.get("role")
-          .and_then(|v: &convex::Value| match v {
-            convex::Value::String(s) => Some(s.into()),
-            _ => None
-          })
-          .ok_or_else(|| {
-            let error_response = ErrorResponse {
-              status: "fail",
-              message: "Invalid user role".to_string(),
-            };
-            (StatusCode::BAD_REQUEST, Json(error_response))
-          })?,
-        photo: obj.get("photo")
-          .and_then(|v: &convex::Value| match v {
-            convex::Value::String(s) => Some(s.to_string()),
-            _ => None
-          })
-          .unwrap_or_else(|| "".to_string()),
-        verified: obj.get("verified")
-          .and_then(|v: &convex::Value| match v {
-            convex::Value::Boolean(s) => Some(s.clone()),
-            _ => None
-          })
-          .ok_or_else(|| {
-            let error_response = ErrorResponse {
-              status: "fail",
-              message: "Invalid user verified".to_string(),
-            };
-            (StatusCode::BAD_REQUEST, Json(error_response))
-          })?,
-        created_at: obj.get("createdAt")
-          .and_then(|v: &convex::Value| match v {
-            convex::Value::Float64(ts) => {
-              // Convert timestamp to DateTime<Utc>
-              let secs = (*ts as i64) / 1000;
-              let nsecs = ((*ts as i64) % 1000) * 1_000_000;
-              Some(Some(DateTime::from_timestamp(secs, nsecs as u32).unwrap_or_default()))
-            }
-            // Keep the string parsing as fallback
-            convex::Value::String(s) => Some(DateTime::parse_from_rfc3339(s.as_str())
-              .ok()
-              .map(|dt| dt.with_timezone(&Utc))),
-            _ => None
-          })
-          .ok_or_else(|| {
-            let error_response = ErrorResponse {
-              status: "fail",
-              message: "Invalid user created_at".to_string(),
-            };
-            (StatusCode::BAD_REQUEST, Json(error_response))
-          })?,
-        updated_at: obj.get("createdAt")
-          .and_then(|v: &convex::Value| match v {
-            convex::Value::Float64(ts) => {
-              // Convert timestamp to DateTime<Utc>
-              let secs = (*ts as i64) / 1000;
-              let nsecs = ((*ts as i64) % 1000) * 1_000_000;
-              Some(Some(DateTime::from_timestamp(secs, nsecs as u32).unwrap_or_default()))
-            }
-            // Keep the string parsing as fallback
-            convex::Value::String(s) => Some(DateTime::parse_from_rfc3339(s.as_str())
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc))),
-            _ => None
-          })
-          .ok_or_else(|| {
-            let error_response = ErrorResponse {
-              status: "fail",
-              message: "Invalid user created_at".to_string(),
-            };
-            (StatusCode::BAD_REQUEST, Json(error_response))
-          })?,
-        }
-    },
-    _ => {
+  let user = match user_result {
+    Ok(Some(user)) => user,
+    Ok(None) => {
+      let error_response = ErrorResponse {
+        status: "fail",
+        message: "User not found".to_string(),
+      };
+      return Err((StatusCode::NOT_FOUND, Json(error_response)));
+    }
+    Err(_) => {
       let error_response = ErrorResponse {
         status: "fail",
         message: "Error fetching user from database".to_string(),
       };
-      return Err((StatusCode::BAD_REQUEST, Json(error_response)));
+      return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)));
     }
   };
 
@@ -211,5 +109,6 @@ pub async fn auth(
     user,
     access_token_uuid,
   });
+
   Ok(next.run(req).await)
 }

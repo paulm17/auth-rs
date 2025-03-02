@@ -1,6 +1,9 @@
 use std::sync::Arc;
-use axum::{extract::State, http::StatusCode, Json};
-use crate::{token::{generate_jwt_token, TokenDetails}, AppState};
+use axum::{extract::State, response::IntoResponse, Json};
+use chrono::Utc;
+use diesel::{ExpressionMethods, RunQueryDsl};
+use reqwest::StatusCode;
+use crate::{schema::{email_confirmation, EmailConfirmationFlowUpdate}, AppState};
 
 pub fn parse_duration(duration_str: &str) -> Result<i64, Box<dyn std::error::Error>> {
     let len = duration_str.len();
@@ -16,30 +19,30 @@ pub fn parse_duration(duration_str: &str) -> Result<i64, Box<dyn std::error::Err
     }
 }
 
-pub fn generate_token(
-    user_id: String,
-    max_age: i64,
-    auth_token: String,
-) -> Result<TokenDetails, (StatusCode, Json<serde_json::Value>)> {
-  generate_jwt_token(user_id, max_age, auth_token).map_err(|e| {
-    let error_response = serde_json::json!({
-        "status": "error",
-        "message": format!("error generating token: {}", e),
-    });
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-  })
-}
-
 pub async fn update_confirm_code(
   State(data): State<Arc<AppState>>,
   id: String,
   flow: String
-) {
-  let mut client = data.convex.clone();
-  
-  let _ = client.mutation("emailConfirmation:updateCode", maplit::btreemap!{
-    "id".into() => id.into(),
-    "flow".into() => flow.into()
-  }).await;
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+  let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
+
+  let timestamp = Utc::now().naive_utc();
+  let statement = diesel::update(email_confirmation::table)
+    .filter(email_confirmation::id.eq(id))
+    .set(&EmailConfirmationFlowUpdate {
+        flow: flow.into(),
+        updated_at: timestamp.into(),
+    })
+    .execute(&mut conn);
+
+  if let Err(e) = statement {
+    let error_response = serde_json::json!({
+        "status": "fail",
+        "message": format!("Failed to reset password: validation error\nDetails: {:?}", e)
+    });
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
+  }
+
+  Ok(())
 }
 

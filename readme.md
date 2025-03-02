@@ -4,6 +4,9 @@ A comprehensive authentication system built with Rust and modern web technologie
 
 ## Features
 
+### Token generation
+- [x] Use rusty_paseto instead of jsonwebtoken, as paseto is considered more secure 
+
 ### Basic Email/Password Authentication
 - [x] Login with Email/Password
 - [x] User Registration and Login
@@ -60,6 +63,8 @@ A comprehensive authentication system built with Rust and modern web technologie
 
 - Rust/Axum (Backend)
 - OAuth2-rs for social authentication
+- Rusty_Paseto for token generation
+- Diesel Orm for database interaction
 - Frontend framework (Specify your choice)
 
 ## Documentation Links

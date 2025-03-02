@@ -11,7 +11,6 @@ use anyhow::Result;
 use serde_json::json;
 use crate::{token::blacklist_token, AppState};
 
-
 pub async fn logout_handler(
   cookie_jar: CookieJar,
   State(data): State<Arc<AppState>>,
@@ -43,7 +42,7 @@ pub async fn logout_handler(
       (StatusCode::FORBIDDEN, Json(error_response))
     })?;  
 
-  if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), access_token).await {
+  if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), &data.paseto.access_key, &access_token).await {
     let error_response = serde_json::json!({
       "status": "fail",
       "message": "Failed to blacklist access token"
@@ -62,7 +61,7 @@ pub async fn logout_handler(
       (StatusCode::FORBIDDEN, Json(error_response))
     })?;
 
-  if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), refresh_token).await {
+  if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), &data.paseto.refresh_key, &refresh_token).await {
     let error_response = serde_json::json!({
       "status": "fail",
       "message": "Failed to blacklist refresh token"

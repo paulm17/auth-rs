@@ -1,0 +1,1 @@
+export type AmazonScopes = 'profile' | 'profile:user_id' | 'postal_code';

@@ -7,11 +7,12 @@ use axum_extra::extract::{
   CookieJar,
 };
 use anyhow::Result;
+use diesel::RunQueryDsl;
 use serde_json::json;
-use convex::FunctionResult::Value;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Utc, TimeZone};
+use ulid::Ulid;
 use crate::{
-  token::{self, blacklist_token}, utils::{generate_token, parse_duration}, AppState
+  schema::{tokens, Token}, token::{self, blacklist_token, generate_paseto_token}, utils::parse_duration, AppState
 };
 
 pub async fn refresh_access_token_handler(
@@ -30,7 +31,7 @@ pub async fn refresh_access_token_handler(
     })?;
 
   let refresh_token_details =
-    match token::verify_jwt_token(data.rsa.refresh_tokens.public_key.to_owned(), &refresh_token)
+    match token::verify_paseto_token(&data.paseto.refresh_key, &refresh_token)
     {
       Ok(token_details) => token_details,
       Err(e) => {
@@ -42,50 +43,47 @@ pub async fn refresh_access_token_handler(
       }
     };  
 
-  let mut client = data.convex.clone();
-  
-  let token_result = client.query("tokens:getTokenById", maplit::btreemap!{
-    "id".into() => refresh_token_details.token_uuid.to_string().into()
-  }).await;
+  let user_id = refresh_token_details.user_id;
 
-  let user_id = match &token_result {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("userId")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::String(s) => Some(s.as_str()),
-        _ => None
-      })
-      .unwrap_or(""),
-    Err(e) => {
-      let error_response = serde_json::json!({
-        "status": "fail",
-        "message": format_args!("Token is invalid or session has expired {:?}", e)
-      });
-      return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
-    }
-    _ => "",
-  };  
-
-  let access_token_details = generate_token(
-    user_id.into(),
+  let access_token_details = generate_paseto_token(
+    user_id.clone().into(),
     data.env.access_token_max_age,
-    data.rsa.access_tokens.private_key.to_owned(),
-  )?;
+    &data.paseto.access_key,
+  ).unwrap();
 
-  let access_token_timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-  client.mutation("tokens:insertToken", maplit::btreemap!{
-    "id".into() => access_token_details.token_uuid.to_string().into(),
-    "userId".into() => user_id.into(),
-    "token".into() => access_token_details.token.clone().unwrap().into(),
-    "expires".into() => access_token_details.expires_in.clone().unwrap().into(),
-    "createdAt".into() => access_token_timestamp_float.into(),
-  }).await
-  .map_err(|_| {
+  let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
+
+  let expires = DateTime::<Utc>::from_timestamp(access_token_details.expires_in.unwrap(), 0)
+    .map(|dt| dt.naive_utc())
+    .unwrap_or_else(|| {
+      // Handle invalid timestamps
+      DateTime::<Utc>::from_timestamp(0, 0)
+        .unwrap()
+        .naive_utc()
+    });
+  let timestamp = Utc::now().naive_utc();
+  let statement = diesel::insert_into(tokens::table)
+    .values(&Token {
+      id: Ulid::new().to_string(),
+      user_id: user_id.clone().into(),
+      token: access_token_details.token.clone().unwrap().into(),
+      token_uuid: access_token_details.token_uuid.to_string(),
+      expires,
+      blacklisted: false,
+      created_at: timestamp,
+      updated_at: None,
+      deleted_at: None
+    })
+    .get_result::<Token>(&mut conn);
+
+  if let Err(e) = statement {
+    let error_message = format!("Failed to save access token: validation error\nDetails: {:?}", e);
     let error_response = serde_json::json!({
       "status": "fail",
-      "message": "access token not saved to database"
+      "message": error_message
     });
-    (StatusCode::FORBIDDEN, Json(error_response))
-  })?;
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
+  }
 
   let access_cookie = Cookie::build(
     ("access_token",
@@ -110,31 +108,14 @@ pub async fn refresh_access_token_handler(
     "application/json".parse().unwrap(),
   );
 
-  let expires = match &token_result {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("expires")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::Float64(s) => Some(s),
-        _ => None
-      })
-      .unwrap_or(&0.0),
-    Err(e) => {
-      let error_response = serde_json::json!({
-        "status": "fail",
-        "message": format_args!("Token is invalid or session has expired {:?}", e)
-      });
-      return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
-    }
-    _ => &0.0,
-  };  
-
   // Convert expires (which is in milliseconds since epoch) to DateTime<Utc>
-  let expiry_time = DateTime::<Utc>::from_timestamp((*expires / 1000.0) as i64, 0).unwrap();
+  let expiry_time: DateTime<Utc> = Utc.from_utc_datetime(&expires);
   let current_time = Utc::now();
   let time_until_expiry = expiry_time.signed_duration_since(current_time);
 
   if time_until_expiry <= Duration::hours(1) {
     // blacklist old refresh token
-    if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), refresh_token).await {
+    if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), &data.paseto.refresh_key, &refresh_token).await {
       let error_response = serde_json::json!({
           "status": "fail",
           "message": "Failed to blacklist refresh token"
@@ -143,27 +124,43 @@ pub async fn refresh_access_token_handler(
     }
 
     // recreate refresh_token
-    let refresh_token_details = generate_token(
-      user_id.into(),
+    let refresh_token_details = generate_paseto_token(
+      user_id.clone().into(),
       data.env.refresh_token_max_age,
-      data.rsa.refresh_tokens.private_key.to_owned(),
-    )?;
+      &data.paseto.refresh_key,
+    ).unwrap();
 
-    let refresh_token_timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-    client.mutation("tokens:insertToken", maplit::btreemap!{
-      "id".into() => refresh_token_details.token_uuid.to_string().into(),
-      "userId".into() => user_id.into(),
-      "token".into() => refresh_token_details.token.clone().unwrap().into(),
-      "expires".into() => refresh_token_details.expires_in.clone().unwrap().into(),
-      "createdAt".into() => refresh_token_timestamp_float.into(),
-    }).await
-    .map_err(|_| {
+    let expires = DateTime::<Utc>::from_timestamp(access_token_details.expires_in.unwrap(), 0)
+    .map(|dt| dt.naive_utc())
+    .unwrap_or_else(|| {
+        // Handle invalid timestamps
+        DateTime::<Utc>::from_timestamp(0, 0)
+            .unwrap()
+            .naive_utc()
+    });
+    let timestamp = Utc::now().naive_utc();
+    let statement = diesel::insert_into(tokens::table)
+      .values(&Token {
+        id: Ulid::new().to_string(),
+        user_id: user_id.into(),
+        token: refresh_token_details.token.clone().unwrap().into(),
+        token_uuid: refresh_token_details.token_uuid.to_string(),
+        expires,
+        blacklisted: false,
+        created_at: timestamp,
+        updated_at: None,
+        deleted_at: None
+      })
+      .get_result::<Token>(&mut conn);
+
+    if let Err(e) = statement {
+      let error_message = format!("Failed to save access token: validation error\nDetails: {:?}", e);
       let error_response = serde_json::json!({
-        "status": "fail",
-        "message": "refresh token not saved to database"
+          "status": "fail",
+          "message": error_message
       });
-      (StatusCode::FORBIDDEN, Json(error_response))
-    })?;    
+      return Err((StatusCode::BAD_REQUEST, Json(error_response)));
+    }
 
     let refresh_cookie = Cookie::build(
       ("refresh_token",

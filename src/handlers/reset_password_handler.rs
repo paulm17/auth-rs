@@ -7,62 +7,34 @@ use axum::{
   extract::State, http::{header, HeaderMap, Response, StatusCode}, response::IntoResponse, Json
 };
 use anyhow::Result;
+use chrono::Utc;
+use diesel::{query_dsl::methods::FilterDsl, ExpressionMethods, OptionalExtension, RunQueryDsl};
 use serde_json::json;
-use convex::FunctionResult::Value;
 use crate::{
-  model::ResetPasswordSchema, utils::update_confirm_code, AppState
+  model::ResetPasswordSchema, schema::{email_confirmation, user, EmailConfirmation, UserPasswordUpdate}, utils::update_confirm_code, AppState
 };
 
 pub async fn reset_password_handler(
   State(data): State<Arc<AppState>>,
   Json(body): Json<ResetPasswordSchema>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-  let mut client = data.convex.clone();
-  let result = client.query("emailConfirmation:getConfirmationByCode", maplit::btreemap!{
-    "code".into() => body.code.to_owned().into(),
-    "flow".into() => "seen".into(),
-  }).await;
+  let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
+  let code = body.code.to_owned();
 
-  let user_id = match &result {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("userId")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::String(s) => Some(s.as_str()),
-        _ => None
-      })
-      .unwrap_or(""),
-    _ => "",
-  };
+  let confirmation_exists = email_confirmation::table
+    .filter(email_confirmation::code.eq(code.clone().to_owned()))
+    .filter(email_confirmation::flow.eq("created"))
+    .first::<EmailConfirmation>(&mut conn)
+    .optional();
 
-  if user_id == "" {
+  let confirmation = if let Ok(Some(confirmation)) = confirmation_exists {
+    confirmation
+  } else {
     let error_response = serde_json::json!({
       "status": "fail",
-      "message": "Code is invalid or has expired"
+      "message": "verification code does not exist"
     });
-    return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
-  }
-
-  let code_id = match &result {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("_id")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::String(s) => Some(s.as_str()),
-        _ => None
-      })
-      .unwrap_or(""),
-    _ => "",
-  };
-
-  let token_result = client.query("users:getUserbyId", maplit::btreemap!{
-    "id".into() => user_id.into()
-  }).await;
-
-  let _id = match &token_result {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("_id")
-      .and_then(|v: &convex::Value| match v {
-          convex::Value::String(s) => Some(s.as_str()),
-          _ => None
-      })
-      .unwrap_or(""),
-    _ => "",
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   };
 
   let salt = SaltString::generate(&mut OsRng);
@@ -77,23 +49,24 @@ pub async fn reset_password_handler(
     })
     .map(|hash| hash.to_string())?;
 
-  let result = client.mutation("users:resetPassword", maplit::btreemap!{
-    "id".into() => _id.into(),
-    "password".into() => hashed_password.into(),
-  }).await;
+    let timestamp = Utc::now().naive_utc();
+    let statement = diesel::update(user::table)
+    .filter(user::id.eq(confirmation.user_id))
+    .set(&UserPasswordUpdate {
+        password: hashed_password.into(),
+        updated_at: timestamp.into(),
+    })
+    .execute(&mut conn);
 
-  if format!("{:?}", result).contains("Server Error") {
-    println!("{:?}", result);
-
-    let error_message = "Failed to reset password";
+  if let Err(e) = statement {
     let error_response = serde_json::json!({
         "status": "fail",
-        "message": error_message
+        "message": format!("Failed to reset password: validation error\nDetails: {:?}", e)
     });
     return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   }
 
-  update_confirm_code(axum::extract::State(data), code_id.to_string(), "completed".to_string()).await;
+  let _ = update_confirm_code(axum::extract::State(data), confirmation.id.to_string(), "completed".to_string()).await;
 
   let mut response = Response::new(
     json!({"status": "ok"})

@@ -3,72 +3,38 @@ use axum::{
   extract::{Query, State}, http::StatusCode, response::{IntoResponse, Redirect}, Json
 };
 use anyhow::Result;
-use convex::FunctionResult::Value;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
+use diesel::{query_dsl::methods::FilterDsl, ExpressionMethods, OptionalExtension, RunQueryDsl};
 use crate::{
-  model::VerifyCodeSchema, utils::update_confirm_code, AppState
+  model::VerifyCodeSchema, schema::{email_confirmation, EmailConfirmation}, utils::update_confirm_code, AppState
 };
 
 pub async fn verify_code_handler(
   State(data): State<Arc<AppState>>,
   Query(body): Query<VerifyCodeSchema>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+  let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
   let code = body.code.to_owned();
 
   // verify code exists and has not been used
-  let mut client = data.convex.clone();
-  let result = client.query("emailConfirmation:getConfirmationByCode", maplit::btreemap!{
-    "code".into() => code.into(),
-    "flow".into() => "created".into(),
-  }).await;
+  let confirmation_exists = email_confirmation::table
+    .filter(email_confirmation::code.eq(code.clone().to_owned()))
+    .filter(email_confirmation::flow.eq("created"))
+    .first::<EmailConfirmation>(&mut conn)
+    .optional();
 
-  let code = match &result {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("code")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::String(s) => Some(s.as_str()),
-        _ => None
-      })
-      .unwrap_or(""),
-    _ => "",
-  };
-
-  if code == "" {
+  let confirmation = if let Ok(Some(confirmation)) = confirmation_exists {
+    confirmation
+  } else {
     let error_response = serde_json::json!({
-        "status": "fail",
-        "message": "verification code does not exist",
+      "status": "fail",
+      "message": "verification code does not exist"
     });
-    return Err((StatusCode::CONFLICT, Json(error_response)));
-  }
-
-  let redirect_to = match &result {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("redirectTo")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::String(s) => Some(s.as_str()),
-        _ => None
-      })
-      .unwrap_or(""),
-    _ => "",
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   };
-
-  let expires = match &result {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("expires")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::Float64(s) => Some(s),
-        _ => None
-      })
-      .unwrap_or(&0.0),
-    Err(_) => {
-      let error_response = serde_json::json!({
-        "status": "fail",
-        "message": "Code is invalid or has expired"
-      });
-      return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
-    }
-    _ => &0.0,
-  };  
 
   let current_time = Utc::now();
-  let expiry_time = DateTime::<Utc>::from_timestamp((*expires / 1000.0) as i64, 0).unwrap();
+  let expiry_time: DateTime<Utc> = Utc.from_utc_datetime(&confirmation.expires);
 
   if current_time > expiry_time {
     let error_response = serde_json::json!({
@@ -78,17 +44,7 @@ pub async fn verify_code_handler(
     return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
   }
 
-  let id = match &result {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("_id")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::String(s) => Some(s.as_str()),
-        _ => None
-      })
-      .unwrap_or(""),
-    _ => "",
-  };
+  let _ = update_confirm_code(axum::extract::State(data), confirmation.id.to_string(), "seen".to_string()).await;
 
-  update_confirm_code(axum::extract::State(data), id.to_string(), "seen".to_string()).await;
-
-  Ok(Redirect::temporary(&format!("{}?code={}", redirect_to, code)))
+  Ok(Redirect::temporary(&format!("{}?code={}", confirmation.redirect_to.unwrap(), confirmation.code)))
 }

@@ -1,5 +1,5 @@
 [package]
-name = "rust-axum-jwt-rs256"
+name = "heimdall-rs"
 version = "0.1.0"
 edition = "2021"
 
@@ -20,17 +20,21 @@ axum-server = { version = "0.7.1", features = ["tls-rustls"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.24", features = ["serde"] }
 convex = "0.9.0"
+diesel = { version = "2.2.7", features = ["postgres", "serde_json", "chrono", "r2d2"] }
 dotenv = "0.15.0"
 handlebars = "6.3.1"
-jsonwebtoken = "9.2.0"
+hmac = "0.12.1"
+hkdf = "0.12.4"
 lettre = "0.11"
 maplit = "1.0.2"
 mail-send = "0.5.0"
 oauth2 = { version="5.0", features=["reqwest"]}
+r2d2 = "0.8.10"
 rand = "0.8.5"
 rcgen = "0.13.2"
 reqwest = { version = "0.12.12", features = ["json"] }
 rustls = "0.23.23"
+rusty_paseto = "0.7.2"
 rsa = { version = "0.9", features = ["pem", "sha2"] }
 sha2 = "0.10"
 serde = { version = "1.0.159", features = ["derive"] }

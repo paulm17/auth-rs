@@ -8,11 +8,12 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use anyhow::Result;
+use diesel::{query_dsl::methods::FilterDsl, ExpressionMethods, OptionalExtension, RunQueryDsl};
 use serde_json::json;
-use convex::FunctionResult::Value;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use ulid::Ulid;
 use crate::{
-  model::LoginUserSchema, utils::{generate_token, parse_duration}, AppState
+  model::LoginUserSchema, schema::{tokens, user, Token, User}, token::generate_paseto_token, utils::parse_duration, AppState
 };
 
 pub async fn login_user_handler(
@@ -20,39 +21,34 @@ pub async fn login_user_handler(
   Json(body): Json<LoginUserSchema>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
   let email = body.email.to_owned().to_ascii_lowercase();
-  let mut client = data.convex.clone();
-  let user_exists = client.query("users:getUserbyEmail", maplit::btreemap!{
-    "email".into() => email.into()
-  }).await;
-
-  let user_id = match &user_exists {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("id")
-      .and_then(|v: &convex::Value| match v {
-        convex::Value::String(s) => Some(s.as_str()),
-        _ => None
-      })
-      .unwrap_or(""),
-    _ => "",
-  };
-
-  let password_hash = match &user_exists {
-    Ok(Value(convex::Value::Object(obj))) => obj.get("password")
-      .and_then(|v| match v {
-        convex::Value::String(s) => Some(s.as_str()),
-        _ => None
-      })
-      .unwrap_or(""),
-    _ => "",
-  };
+  let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
   
-  let is_valid = match PasswordHash::new(password_hash) {
+  let user_exists = user::table
+    .filter(user::email.eq(email.clone()))
+    .first::<User>(&mut conn)
+    .optional();
+
+  let user = if let Ok(Some(user)) = user_exists {
+    user
+  } else {
+    let error_response = serde_json::json!({
+        "status": "fail",
+        "message": "Invalid email or password"
+    });
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
+  };
+
+  let user_id = user.id.as_str();
+  let password_hash = user.password.unwrap();
+  
+  let is_valid_password = match PasswordHash::new(&password_hash) {
     Ok(parsed_hash) => Argon2::default()
       .verify_password(body.password.as_bytes(), &parsed_hash)
       .map_or(false, |_| true),
     Err(_) => false,
   };    
 
-  if !is_valid {
+  if !is_valid_password {
     let error_response = serde_json::json!({
       "status": "fail",
       "message": "Invalid email or password"
@@ -60,17 +56,17 @@ pub async fn login_user_handler(
     return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   }    
 
-  let access_token_details = generate_token(
+  let access_token_details = generate_paseto_token(
     user_id.to_string(),
     data.env.access_token_max_age,
-    data.rsa.access_tokens.private_key.to_owned()
-  )?;
+    &data.paseto.access_key,
+  ).unwrap();
 
-  let refresh_token_details = generate_token(
+  let refresh_token_details = generate_paseto_token(
     user_id.to_string(),
     data.env.refresh_token_max_age,
-    data.rsa.refresh_tokens.private_key.to_owned(),
-  )?;
+    &data.paseto.refresh_key,
+  ).unwrap();
 
   let access_cookie = Cookie::build(
     ("access_token",
@@ -90,17 +86,31 @@ pub async fn login_user_handler(
     .same_site(SameSite::None)
     .http_only(true);
 
-  let access_token_timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-  let result = client.mutation("tokens:insertToken", maplit::btreemap!{
-    "id".into() => access_token_details.token_uuid.to_string().into(),
-    "userId".into() => user_id.into(),
-    "token".into() => access_token_details.token.clone().unwrap().into(),
-    "expires".into() => (access_token_details.expires_in.clone().unwrap() as f64).into(),
-    "createdAt".into() => access_token_timestamp_float.into(),
-  }).await;
+  let expires = DateTime::<Utc>::from_timestamp(access_token_details.expires_in.unwrap(), 0)
+    .map(|dt| dt.naive_utc())
+    .unwrap_or_else(|| {
+      // Handle invalid timestamps
+      DateTime::<Utc>::from_timestamp(0, 0)
+        .unwrap()
+        .naive_utc()
+    });
+  let timestamp = Utc::now().naive_utc();
+  let statement = diesel::insert_into(tokens::table)
+    .values(&Token {
+      id: Ulid::new().to_string(),
+      user_id: user_id.into(),
+      expires,
+      blacklisted: false,
+      token: access_token_details.token.clone().unwrap(),
+      token_uuid: access_token_details.token_uuid.to_string(),
+      created_at: timestamp,
+      updated_at: None,
+      deleted_at: None
+    })
+    .execute(&mut conn);
   
-  if format!("{:?}", result).contains("Server Error") {
-    let error_message = format!("Failed to save access token: validation error\nDetails: {:?}", result);
+  if let Err(e) = statement {
+    let error_message = format!("Failed to save access token: validation error\nDetails: {:?}", e);
     let error_response = serde_json::json!({
         "status": "fail",
         "message": error_message
@@ -108,27 +118,41 @@ pub async fn login_user_handler(
     return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   }
 
-  let refresh_token_timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-  let result = client.mutation("tokens:insertToken", maplit::btreemap!{
-    "id".into() => refresh_token_details.token_uuid.to_string().into(),
-    "userId".into() => user_id.into(),
-    "token".into() => refresh_token_details.token.clone().unwrap().into(),
-    "expires".into() => (refresh_token_details.expires_in.clone().unwrap() as f64).into(),
-    "createdAt".into() => refresh_token_timestamp_float.into(),
-  }).await;
+  let expires = DateTime::<Utc>::from_timestamp(refresh_token_details.expires_in.unwrap(), 0)
+    .map(|dt| dt.naive_utc())
+    .unwrap_or_else(|| {
+      // Handle invalid timestamps
+      DateTime::<Utc>::from_timestamp(0, 0)
+        .unwrap()
+        .naive_utc()
+    });
+  let timestamp = Utc::now().naive_utc();
+  let statement = diesel::insert_into(tokens::table)
+    .values(&Token {
+      id: Ulid::new().to_string(),
+      user_id: user_id.into(),
+      expires,
+      blacklisted: false,
+      token: refresh_token_details.token.clone().unwrap(),
+      token_uuid: refresh_token_details.token_uuid.to_string(),
+      created_at: timestamp,
+      updated_at: None,
+      deleted_at: None
+    })
+    .execute(&mut conn);
 
-  if format!("{:?}", result).contains("Server Error") {
-    let error_message = format!("Failed to save refresh token: validation error\nDetails: {:?}", result);
+  if let Err(e) = statement {
+    let error_message = format!("Failed to save refresh token: validation error\nDetails: {:?}", e);
     let error_response = serde_json::json!({
-        "status": "fail",
-        "message": error_message
+      "status": "fail",
+      "message": error_message
     });
     return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   }
 
   let mut response = Response::new(
     json!({"status": "success", "access_token": access_token_details.token.unwrap()})
-        .to_string(),
+      .to_string(),
   );
   let mut headers = HeaderMap::new();
   headers.append(

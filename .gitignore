@@ -30,7 +30,7 @@ dist
 # rust
 target/
 Cargo.lock
-rsa_tokens.toml
+paseto_tokens.toml
 
 # Debug
 npm-debug.log*

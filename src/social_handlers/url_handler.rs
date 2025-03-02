@@ -6,11 +6,11 @@ use axum::{
     Json,
 };
 use anyhow::Result;
+use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl};
 use serde_json::json;
 use ulid::Ulid;
 use chrono::{Duration, Utc};
-use convex::FunctionResult::Value;
-use crate::{model::OAuthSchema, AppState};
+use crate::{model::OAuthSchema, schema::{social_auth, social_provider, SocialAuth, SocialProvider}, AppState};
 use oauth2::{
   basic::BasicClient,
   AuthUrl,
@@ -133,7 +133,9 @@ pub async fn url_handler(
   State(data): State<Arc<AppState>>,
   Json(body): Json<OAuthSchema>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-  let provider = match OAuthProvider::from_str(&body.provider) {
+  let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
+
+  let provider = match OAuthProvider::from_str(&body.provider.clone()) {
     Some(p) => p,
     None => {
       let error_response = json!({
@@ -147,41 +149,20 @@ pub async fn url_handler(
   let scopes = body.scopes.to_owned();
   let callback_url = body.callback_url.to_owned();
 
-  let mut client = data.convex.clone();
-  let provider_exists = client
-    .query(
-      "socialProviders:getProviderByName",
-      maplit::btreemap! {
-        "name".into() => body.provider.into(),
-      },
-    )
-    .await;
+  let provider_exists = social_provider::table
+    .filter(social_provider::name.eq(body.provider))
+    .first::<SocialProvider>(&mut conn)
+    .optional();
 
-  let provider_id = match &provider_exists {
-    Ok(Value(convex::Value::Object(obj))) => obj
-      .get("id")
-      .and_then(|v: &convex::Value| match v {
-          convex::Value::String(s) => Some(s.as_str()),
-          _ => None,
-      })
-      .unwrap_or(""),
-    Err(e) => {
-      let error_response = json!({
-        "status": "fail",
-        "message": format!("Provider not found {:?}", e)
-      });
-      return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
-    }
-    _ => "",
-  };
-
-  if provider_id.is_empty() {
-    let error_response = json!({
+  let provider_id = if let Ok(Some(provider)) = provider_exists {
+    provider.id
+  } else {
+    let error_response = serde_json::json!({
       "status": "fail",
       "message": "Provider not found"
     });
     return Err((StatusCode::BAD_REQUEST, Json(error_response)));
-  }
+  };
 
   let client_id = ClientId::new(provider.client_id(&data));
   let client_secret = ClientSecret::new(provider.client_secret(&data));
@@ -218,34 +199,28 @@ pub async fn url_handler(
   let (auth_url, csrf_token) = auth_builder.url();
 
   // Store CSRF token in database for verification
-  let mut client = data.convex.clone();
-  let timestamp_float = Utc::now().timestamp_millis() as f64 / 1000.0;
-  let expires = Utc::now() + Duration::minutes(10);
-  let expires_timestamp = expires.timestamp() as f64 * 1000.0;
-
-  let result = client
-    .mutation(
-    "socialOauth:insertToken",
-    maplit::btreemap! {
-      "id".into() => Ulid::new().to_string().into(),
-      "providerId".into() => provider_id.into(),
-      "csrf".into() => csrf_token.secret().to_string().into(),
-      "pkceVerifier".into() => pkce_verifier.into(),
-      "redirectTo".into() => callback_url.into(),
-      "expires".into() => expires_timestamp.into(),
-      "createdAt".into() => timestamp_float.into(),
-    },
-  )
-  .await;
-
-  if format!("{:?}", result).contains("Server Error") {
-    println!("{:?}", result);
-
-    let error_response = json!({
-      "status": "fail",
-      "message": "Failed to store CSRF token",
+  let expires = (Utc::now() + Duration::days(10)).naive_utc();
+  let timestamp = Utc::now().naive_utc();
+  let statement = diesel::insert_into(social_auth::table)
+    .values(&SocialAuth {
+      id: Ulid::new().to_string(),
+      provider_id: provider_id.into(),
+      csrf: csrf_token.secret().to_string().into(),
+      pkce_verifier: pkce_verifier.into(),
+      redirect_to: callback_url.into(),
+      expires,
+      created_at: timestamp,
+      updated_at: None,
+      deleted_at: None
+    })
+    .execute(&mut conn);
+  
+  if let Err(e) = statement {
+    let error_response = serde_json::json!({
+        "status": "fail",
+        "message": format!("forgot password code not saved to database: validation error\nDetails: {:?}", e)
     });
-    return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)));
+    return Err((StatusCode::BAD_REQUEST, Json(error_response)));
   }
 
   let mut response = Response::new(json!({ "url": auth_url.as_str().to_string() }).to_string());

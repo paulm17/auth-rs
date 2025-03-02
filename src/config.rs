@@ -4,8 +4,8 @@ fn get_env_var(var_name: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-  pub convex_url: String,    
   pub client_origin: String,
+  pub database_url: String,    
   pub server_url: String,
 
   pub mailer_server: String,
@@ -47,7 +47,7 @@ pub struct Config {
   pub twitter_client_secret: String,
   pub twitter_redirect_url: String,
 
-  pub auth_token: String,
+  // pub auth_token: String,
   pub access_token_expires_in: String,
   pub access_token_max_age: i64,
   pub refresh_token_expires_in: String,
@@ -56,11 +56,11 @@ pub struct Config {
 
 impl Config {
   pub fn init() -> Config {
-    let convex_url = get_env_var("AUTH_CONVEX_URL");        
+    let database_url = get_env_var("DATABASE_URL");        
     let client_origin = get_env_var("AUTH_CLIENT_ORIGIN");        
     let server_url = get_env_var("AUTH_SERVER_URL");
 
-    let auth_token = get_env_var("AUTH_TOKEN");
+    // let auth_token = get_env_var("AUTH_TOKEN");
     let access_token_expires_in = get_env_var("AUTH_ACCESS_TOKEN_EXPIRED_IN");
     let access_token_max_age = get_env_var("AUTH_ACCESS_TOKEN_MAXAGE");
     let refresh_token_expires_in = get_env_var("AUTH_REFRESH_TOKEN_EXPIRED_IN");
@@ -107,7 +107,7 @@ impl Config {
 
     Config {
       client_origin,
-      convex_url,
+      database_url,
       server_url,
       mailer_server,
       mailer_port,
@@ -146,7 +146,7 @@ impl Config {
       twitter_client_id,
       twitter_client_secret,
       twitter_redirect_url,
-      auth_token,
+      // auth_token,
       access_token_expires_in,
       access_token_max_age: access_token_max_age.parse::<i64>().unwrap(),
       refresh_token_expires_in,

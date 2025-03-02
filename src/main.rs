@@ -6,14 +6,16 @@ mod model;
 mod response;
 mod route;
 mod token;
-mod rsa;
+mod paseto;
+mod schema;
 mod smtp;
 mod template;
 mod utils;
 
-use convex::ConvexClient;
 use config::Config;
-use rsa::RsaConfig;
+use diesel::r2d2::{self, ConnectionManager};
+use diesel::PgConnection;
+use paseto::{init, PasetoConfig};
 use std::sync::Arc;
 use axum::http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE}, HeaderValue, Method
@@ -26,10 +28,12 @@ use axum_server::tls_rustls::RustlsConfig;
 use tracing::{Level, subscriber::set_global_default};
 use tracing_subscriber::FmtSubscriber;
 
+type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
+
 pub struct AppState {
-  convex: ConvexClient,
+  db_pool: DbPool,
   env: Config,
-  rsa: RsaConfig
+  paseto: PasetoConfig
 }
 
 #[tokio::main]
@@ -49,19 +53,23 @@ async fn main() {
   .expect("failed to install default crypto provider");
 
   let config = Config::init();
-  let client = ConvexClient::new(&config.convex_url).await.unwrap();
   let cors = CorsLayer::new()
     .allow_origin(config.clone().client_origin.parse::<HeaderValue>().unwrap())
     .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
     .allow_credentials(true)
     .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE]);  
 
-  let rsa_tokens = rsa::init(client.clone()).await;
+  let manager = ConnectionManager::<PgConnection>::new(&config.database_url);
+  let pool = r2d2::Pool::builder()
+    .build(manager)
+    .expect("Failed to create pool.");
+
+  let paseto_config = init(pool.clone()).await;
 
   let app = create_router(Arc::new(AppState {
-    convex: client.clone(),
+    db_pool: pool,
     env: config.clone(),
-    rsa: rsa_tokens.unwrap()
+    paseto: paseto_config.unwrap(),
   }))
   .layer(cors);
 
