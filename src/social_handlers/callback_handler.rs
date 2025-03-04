@@ -228,13 +228,13 @@ pub async fn callback_handler(
   let access_token_details = generate_paseto_token(
     user_id.clone(),
     data.env.access_token_max_age,
-    &data.paseto.access_key,
+    &data.env.auth_key,
   ).unwrap();
 
   let refresh_token_details = generate_paseto_token(
     user_id.clone(),
     data.env.refresh_token_max_age,
-    &data.paseto.refresh_key,
+    &data.env.auth_key,
   ).unwrap();
 
   // Save tokens
@@ -309,16 +309,18 @@ pub async fn callback_handler(
     ("access_token", access_token_details.token.clone().unwrap_or_default()),
   )
     .path("/")
+    .secure(true)
     .max_age(time::Duration::seconds(parse_duration(&data.env.access_token_expires_in).unwrap_or(900)))
-    .same_site(SameSite::None)
-    .http_only(false);
+    .same_site(SameSite::Strict)
+    .http_only(true);
 
   let refresh_cookie = Cookie::build(
     ("refresh_token", refresh_token_details.token.clone().unwrap_or_default()),
   )
     .path("/")
+    .secure(true)
     .max_age(time::Duration::seconds(parse_duration(&data.env.refresh_token_expires_in).unwrap_or(900)))
-    .same_site(SameSite::None)
+    .same_site(SameSite::Strict)
     .http_only(true);
 
   let redirect = Redirect::temporary(&social_oauth.redirect_to);

@@ -1,8 +1,6 @@
-use base64::{engine::general_purpose, Engine as _};
 use axum::{extract::State, http::StatusCode, Json};
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
-use std::convert::TryInto;
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
@@ -39,15 +37,12 @@ pub fn generate_paseto_token(
   ttl: i64,
   secret: &str,
 ) -> Result<TokenDetails, Box<dyn Error>> {
-  // Decode the secret from base64 (ensuring it is exactly 32 bytes)
-  let key_bytes = general_purpose::STANDARD.decode(secret)?;
-  let key_bytes: [u8; 32] = key_bytes.try_into().map_err(|_| "Invalid key length: must be exactly 32 bytes")?;
-  let key = Key::from(key_bytes);
-  let symmetric_key = PasetoSymmetricKey::<V4, Local>::from(key);
-
-  let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+  let private_key = Key::<64>::try_from(&secret[..]).unwrap();
+  let pk: &[u8] = private_key.as_slice();
+  let private_key = PasetoAsymmetricPrivateKey::<V4, Public>::from(pk);
 
   let token_uuid = Uuid::new_v4();
+  let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
   let exp = now + (ttl * 60); // ttl in minutes converted to seconds
 
   let claims = TokenClaims {
@@ -63,13 +58,13 @@ pub fn generate_paseto_token(
   let iat_datetime: DateTime<Utc> = DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(now as u64));
   let nbf_datetime: DateTime<Utc> = DateTime::<Utc>::from(UNIX_EPOCH + std::time::Duration::from_secs(now as u64));
 
-  let token = PasetoBuilder::<V4, Local>::default()
+  let token = PasetoBuilder::<V4, Public>::default()
     .set_claim(SubjectClaim::from(claims.sub.as_str()))
     .set_claim(CustomClaim::try_from(("token_uuid", claims.token_uuid.clone())).unwrap())
     .set_claim(ExpirationClaim::try_from(exp_datetime.to_rfc3339()).unwrap())
     .set_claim(IssuedAtClaim::try_from(iat_datetime.to_rfc3339()).unwrap())
     .set_claim(NotBeforeClaim::try_from(nbf_datetime.to_rfc3339()).unwrap())
-    .build(&symmetric_key)?;
+    .build(&private_key)?;
 
   Ok(TokenDetails {
     user_id,
@@ -83,19 +78,22 @@ pub fn verify_paseto_token(
   secret: &str,
   token: &str,
 ) -> Result<TokenDetails, Box<dyn Error>> {
-  // ... existing key decoding code ...
-  let key_bytes = general_purpose::STANDARD.decode(secret)?;
-  let key_bytes: [u8; 32] = key_bytes
-    .try_into()
-    .map_err(|_| "Invalid key length: must be exactly 32 bytes")?;
-  let key = Key::from(key_bytes);
-  let symmetric_key = PasetoSymmetricKey::<V4, Local>::from(key);
+  // Convert hex string to bytes
+  let secret_bytes = hex::decode(secret)?;
+
+  let mut key_data = [0u8; 32];
+  key_data.copy_from_slice(&secret_bytes[32..]);
+
+  let key = Key::<32>::from(key_data);
+  let public_key = PasetoAsymmetricPublicKey::<V4, Public>::from(&key);
 
   // Create a parser without claim validation first
-  let mut parser = PasetoParser::<V4, Local>::default();
+  let mut parser = PasetoParser::<V4, Public>::default();
   
   // Parse the token first to get raw claims
-  let parsed_token = parser.parse(token, &symmetric_key)?;
+  let parsed_token = parser.parse(token, &public_key)
+    .map_err(|e| format!("Failed to parse token: {}", e))?;
+
   let claims = parsed_token.as_object().ok_or("Invalid token structure")?;
 
   // Extract claims manually

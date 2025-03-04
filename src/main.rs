@@ -6,7 +6,6 @@ mod model;
 mod response;
 mod route;
 mod token;
-mod paseto;
 mod schema;
 mod smtp;
 mod template;
@@ -15,10 +14,11 @@ mod utils;
 use config::Config;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::PgConnection;
-use paseto::{init, PasetoConfig};
 use std::sync::Arc;
 use axum::http::{
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE}, HeaderValue, Method
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, 
+      ORIGIN, USER_AGENT, ACCESS_CONTROL_REQUEST_HEADERS,
+      ACCESS_CONTROL_REQUEST_METHOD}, HeaderValue, Method
 };
 use dotenv::dotenv;
 use route::create_router;
@@ -33,7 +33,6 @@ type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 pub struct AppState {
   db_pool: DbPool,
   env: Config,
-  paseto: PasetoConfig
 }
 
 #[tokio::main]
@@ -53,23 +52,34 @@ async fn main() {
   .expect("failed to install default crypto provider");
 
   let config = Config::init();
+  // let cors = CorsLayer::new()
+  //   .allow_origin(config.clone().client_origin.parse::<HeaderValue>().unwrap())
+  //   .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+  //   .allow_credentials(true)
+  //   .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE]);  
+
   let cors = CorsLayer::new()
-    .allow_origin(config.clone().client_origin.parse::<HeaderValue>().unwrap())
-    .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+    .allow_origin(config.clone().client_origin.parse::<HeaderValue>().unwrap()) // Explicit frontend origin
+    .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS]) // Add OPTIONS
     .allow_credentials(true)
-    .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE]);  
+    .allow_headers([
+      AUTHORIZATION, 
+      ACCEPT, 
+      CONTENT_TYPE,
+      ORIGIN,
+      USER_AGENT,
+      ACCESS_CONTROL_REQUEST_HEADERS,
+      ACCESS_CONTROL_REQUEST_METHOD,
+    ]);
 
   let manager = ConnectionManager::<PgConnection>::new(&config.database_url);
   let pool = r2d2::Pool::builder()
     .build(manager)
     .expect("Failed to create pool.");
 
-  let paseto_config = init(pool.clone()).await;
-
   let app = create_router(Arc::new(AppState {
     db_pool: pool,
     env: config.clone(),
-    paseto: paseto_config.unwrap(),
   }))
   .layer(cors);
 
@@ -92,14 +102,14 @@ async fn main() {
         .await
         .unwrap();
 
-      axum_server::bind_rustls("0.0.0.0:8443".parse().unwrap(), config)
+      axum_server::bind_rustls("0.0.0.0:9179".parse().unwrap(), config)
         .serve(https_app.into_make_service())
         .await
         .unwrap();
     },
     // HTTP Server
     async {
-      let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
+      let listener = tokio::net::TcpListener::bind("0.0.0.0:9178").await.unwrap();
       axum::serve(listener, app).await.unwrap();
     }
   );

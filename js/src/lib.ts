@@ -17,9 +17,7 @@ export class BaseClient {
   }
 
   protected getAuthHeader = (): HeadersInit => {
-    return this.accessToken
-      ? { 'Authorization': `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' }
-      : { 'Content-Type': 'application/json' };
+    return { 'Content-Type': 'application/json' };
   };
 
   /**

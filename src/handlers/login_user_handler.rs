@@ -59,13 +59,13 @@ pub async fn login_user_handler(
   let access_token_details = generate_paseto_token(
     user_id.to_string(),
     data.env.access_token_max_age,
-    &data.paseto.access_key,
+    &data.env.auth_key,
   ).unwrap();
 
   let refresh_token_details = generate_paseto_token(
     user_id.to_string(),
     data.env.refresh_token_max_age,
-    &data.paseto.refresh_key,
+    &data.env.auth_key,
   ).unwrap();
 
   let access_cookie = Cookie::build(
@@ -73,17 +73,19 @@ pub async fn login_user_handler(
     access_token_details.token.clone().unwrap_or_default()),
   )
     .path("/")
+    .secure(true)
     .max_age(time::Duration::seconds(parse_duration(&data.env.access_token_expires_in).unwrap_or(900))) // 15 minutes default
-    .same_site(SameSite::None)
-    .http_only(false);
+    .same_site(SameSite::Strict)
+    .http_only(true);
 
   let refresh_cookie = Cookie::build(
     ("refresh_token",
     refresh_token_details.token.clone().unwrap_or_default()),
   )
     .path("/")
+    .secure(true)
     .max_age(time::Duration::seconds(parse_duration(&data.env.refresh_token_expires_in).unwrap_or(900))) // 15 minutes default
-    .same_site(SameSite::None)
+    .same_site(SameSite::Strict)
     .http_only(true);
 
   let expires = DateTime::<Utc>::from_timestamp(access_token_details.expires_in.unwrap(), 0)

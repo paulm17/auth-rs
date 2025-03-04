@@ -17,19 +17,16 @@ pub async fn logout_handler(
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
   let access_cookie = Cookie::build(("access_token", ""))
     .path("/")
+    .secure(true)
     .max_age(time::Duration::minutes(-1))
-    .same_site(SameSite::None)
-    .http_only(false);
+    .same_site(SameSite::Strict)
+    .http_only(true);
   let refresh_cookie = Cookie::build(("refresh_token", ""))
     .path("/")
+    .secure(true)
     .max_age(time::Duration::minutes(-1))
-    .same_site(SameSite::None)
+    .same_site(SameSite::Strict)
     .http_only(true);
-  let logged_in_cookie = Cookie::build(("logged_in", "true"))
-    .path("/")
-    .max_age(time::Duration::minutes(-1))
-    .same_site(SameSite::None)
-    .http_only(false);
 
   let access_token = cookie_jar
     .get("access_token")
@@ -42,7 +39,7 @@ pub async fn logout_handler(
       (StatusCode::FORBIDDEN, Json(error_response))
     })?;  
 
-  if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), &data.paseto.access_key, &access_token).await {
+  if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), &data.env.auth_key, &access_token).await {
     let error_response = serde_json::json!({
       "status": "fail",
       "message": "Failed to blacklist access token"
@@ -61,7 +58,7 @@ pub async fn logout_handler(
       (StatusCode::FORBIDDEN, Json(error_response))
     })?;
 
-  if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), &data.paseto.refresh_key, &refresh_token).await {
+  if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), &data.env.auth_key, &refresh_token).await {
     let error_response = serde_json::json!({
       "status": "fail",
       "message": "Failed to blacklist refresh token"
@@ -77,10 +74,6 @@ pub async fn logout_handler(
   headers.append(
     header::SET_COOKIE,
     refresh_cookie.to_string().parse().unwrap(),
-  );
-  headers.append(
-    header::SET_COOKIE,
-    logged_in_cookie.to_string().parse().unwrap(),
   );
 
   let mut response = Response::new(json!({"status": "success"}).to_string());

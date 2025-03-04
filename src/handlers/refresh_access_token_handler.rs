@@ -31,7 +31,7 @@ pub async fn refresh_access_token_handler(
     })?;
 
   let refresh_token_details =
-    match token::verify_paseto_token(&data.paseto.refresh_key, &refresh_token)
+    match token::verify_paseto_token(&data.env.auth_key, &refresh_token)
     {
       Ok(token_details) => token_details,
       Err(e) => {
@@ -48,7 +48,7 @@ pub async fn refresh_access_token_handler(
   let access_token_details = generate_paseto_token(
     user_id.clone().into(),
     data.env.access_token_max_age,
-    &data.paseto.access_key,
+    &data.env.auth_key,
   ).unwrap();
 
   let mut conn = data.db_pool.get().expect("Failed to get connection from pool");
@@ -90,9 +90,10 @@ pub async fn refresh_access_token_handler(
     access_token_details.token.clone().unwrap_or_default()),
   )
     .path("/")
+    .secure(true)
     .max_age(time::Duration::seconds(parse_duration(&data.env.access_token_expires_in).unwrap_or(900))) // 15 minutes default
-    .same_site(SameSite::None)
-    .http_only(false);
+    .same_site(SameSite::Strict)
+    .http_only(true);
 
   let mut response = Response::new(
     json!({"status": "success", "access_token": access_token_details.token.unwrap()})
@@ -115,7 +116,7 @@ pub async fn refresh_access_token_handler(
 
   if time_until_expiry <= Duration::hours(1) {
     // blacklist old refresh token
-    if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), &data.paseto.refresh_key, &refresh_token).await {
+    if let Ok(false) = blacklist_token(axum::extract::State(data.clone()), &data.env.auth_key, &refresh_token).await {
       let error_response = serde_json::json!({
           "status": "fail",
           "message": "Failed to blacklist refresh token"
@@ -127,7 +128,7 @@ pub async fn refresh_access_token_handler(
     let refresh_token_details = generate_paseto_token(
       user_id.clone().into(),
       data.env.refresh_token_max_age,
-      &data.paseto.refresh_key,
+      &data.env.auth_key,
     ).unwrap();
 
     let expires = DateTime::<Utc>::from_timestamp(access_token_details.expires_in.unwrap(), 0)
@@ -167,9 +168,10 @@ pub async fn refresh_access_token_handler(
       refresh_token_details.token.clone().unwrap_or_default()),
     )
     .path("/")
+    .secure(true)
     .max_age(time::Duration::seconds(parse_duration(&data.env.refresh_token_expires_in).unwrap_or(900))) // 15 minutes default
-    .same_site(SameSite::None)
-    .http_only(false);
+    .same_site(SameSite::Strict)
+    .http_only(true);
 
     headers.append(
       header::SET_COOKIE,

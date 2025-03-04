@@ -58,12 +58,12 @@ pub async fn auth(
   })?;  
 
   let access_token_details =
-    match token::verify_paseto_token(&data.paseto.access_key, &access_token) {
+    match token::verify_paseto_token(&data.env.auth_key, &access_token) {
       Ok(token_details) => token_details,
       Err(e) => {
         let error_response = ErrorResponse {
           status: "fail",
-          message: format!("{:?}", e),
+          message: format!("verify_paseto_token {:?}", e),
         };
         return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
       }
